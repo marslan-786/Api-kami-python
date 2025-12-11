@@ -5,18 +5,22 @@ import re
 import os
 import logging
 from flask import Flask, jsonify, request
+from gevent.pywsgi import WSGIServer # Production Server
 
-# سیٹ اپ
 app = Flask(__name__)
+
+# لاگز کو خاموش کریں تاکہ کنسول صاف رہے
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
+# --- CONFIGURATION ---
 CREDENTIALS = {
     "username": "Kami522",
     "password": "Kami526"
 }
 
 BASE_URL = "http://51.89.99.105/NumberPanel"
+# آپ کے لنکس
 URL_NUMBERS_BASE = "http://51.89.99.105/NumberPanel/client/res/data_smsnumbers.php?frange=&fclient=&sEcho=2&iColumns=6&sColumns=%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1&mDataProp_0=0&sSearch_0=&bRegex_0=false&bSearchable_0=true&bSortable_0=true&mDataProp_1=1&sSearch_1=&bRegex_1=false&bSearchable_1=true&bSortable_1=true&mDataProp_2=2&sSearch_2=&bRegex_2=false&bSearchable_2=true&bSortable_2=true&mDataProp_3=3&sSearch_3=&bRegex_3=false&bSearchable_3=true&bSortable_3=true&mDataProp_4=4&sSearch_4=&bRegex_4=false&bSearchable_4=true&bSortable_4=true&mDataProp_5=5&sSearch_5=&bRegex_5=false&bSearchable_5=true&bSortable_5=true&sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=asc&iSortingCols=1"
 URL_OTP_BASE = "http://51.89.99.105/NumberPanel/client/res/data_smscdr.php?fdate1=2025-12-11%2000:00:00&fdate2=2025-12-11%2023:59:59&frange=&fnum=&fcli=&fgdate=&fgmonth=&fgrange=&fgnumber=&fgcli=&fg=0&sesskey=Q05RRkJQUEJCVQ==&sEcho=2&iColumns=7&sColumns=%2C%2C%2C%2C%2C%2C&iDisplayStart=0&iDisplayLength=-1&mDataProp_0=0&sSearch_0=&bRegex_0=false&bSearchable_0=true&bSortable_0=true&mDataProp_1=1&sSearch_1=&bRegex_1=false&bSearchable_1=true&bSortable_1=true&mDataProp_2=2&sSearch_2=&bRegex_2=false&bSearchable_2=true&bSortable_2=true&mDataProp_3=3&sSearch_3=&bRegex_3=false&bSearchable_3=true&bSortable_3=true&mDataProp_4=4&sSearch_4=&bRegex_4=false&bSearchable_4=true&bSortable_4=true&mDataProp_5=5&sSearch_5=&bRegex_5=false&bSearchable_5=true&bSortable_5=true&mDataProp_6=6&sSearch_6=&bRegex_6=false&bSearchable_6=true&bSortable_6=true&sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=desc&iSortingCols=1"
 
@@ -27,84 +31,107 @@ HEADERS = {
     "Origin": "http://51.89.99.105"
 }
 
-# گلوبل ویری ایبلز (Shared Memory)
+COOKIE_FILE = "session_cookie.txt"
+
 class SessionManager:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
-        self.session.cookies.set("PHPSESSID", "jfogu3u27tvo7p2fdkt8tfs4k8") # Initial Cookie
         self.lock = threading.Lock()
-        self.is_logging_in = False
+        self.last_login_time = 0
+        
+        # 1. پہلے سے موجود کوکی لوڈ کریں (اگر ہو)
+        self.load_cookie_from_file()
 
     def get_timestamp(self):
         return int(time.time() * 1000)
 
-    def login(self):
-        with self.lock:
-            if self.is_logging_in:
-                return
-            self.is_logging_in = True
-        
-        print("⚡ Background: Starting Login Process...")
+    def save_cookie_to_file(self, cookie_value):
         try:
-            # Login Timeout 10s (Fast Fail)
-            r1 = self.session.get(f"{BASE_URL}/login", timeout=10)
-            match = re.search(r"What is (\d+) \+ (\d+) = \?", r1.text)
-            
-            if match:
-                ans = int(match.group(1)) + int(match.group(2))
-                payload = {
-                    "username": CREDENTIALS["username"],
-                    "password": CREDENTIALS["password"],
-                    "capt": str(ans)
-                }
-                headers = {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": f"{BASE_URL}/login"
-                }
-                self.session.post(f"{BASE_URL}/signin", data=payload, headers=headers, timeout=10)
-                if "PHPSESSID" in self.session.cookies:
-                    print("✅ Background: Login Successful")
-                else:
-                    print("❌ Background: Login Failed")
-            else:
-                print("❌ Background: Captcha Not Found")
+            with open(COOKIE_FILE, "w") as f:
+                f.write(cookie_value)
         except Exception as e:
-            print(f"⚠️ Background Login Error: {e}")
-        finally:
-            self.is_logging_in = False
+            print(f"⚠️ Error saving cookie: {e}")
+
+    def load_cookie_from_file(self):
+        try:
+            if os.path.exists(COOKIE_FILE):
+                with open(COOKIE_FILE, "r") as f:
+                    cookie = f.read().strip()
+                    if cookie:
+                        self.session.cookies.set("PHPSESSID", cookie)
+                        print(f"📂 Loaded Cookie from File: {cookie}")
+            else:
+                # اگر فائل نہیں ہے تو ڈیفالٹ کوکی
+                self.session.cookies.set("PHPSESSID", "jfogu3u27tvo7p2fdkt8tfs4k8")
+        except Exception as e:
+            print(f"⚠️ Error loading cookie: {e}")
+
+    def login(self):
+        # تھریڈ لاک: تاکہ ایک وقت میں صرف ایک ہی لاگ ان ریکویسٹ جائے
+        with self.lock:
+            # اگر ابھی 30 سیکنڈ پہلے لاگ ان ہوا ہے تو دوبارہ مت کرو
+            if time.time() - self.last_login_time < 30:
+                print("⏳ Login ignored (Too frequent)")
+                return
+
+            print("⚡ System: Starting Login Process...")
+            try:
+                r1 = self.session.get(f"{BASE_URL}/login", timeout=10)
+                match = re.search(r"What is (\d+) \+ (\d+) = \?", r1.text)
+                
+                if match:
+                    ans = int(match.group(1)) + int(match.group(2))
+                    payload = {
+                        "username": CREDENTIALS["username"],
+                        "password": CREDENTIALS["password"],
+                        "capt": str(ans)
+                    }
+                    headers = {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Referer": f"{BASE_URL}/login"
+                    }
+                    
+                    self.session.post(f"{BASE_URL}/signin", data=payload, headers=headers, timeout=10)
+                    
+                    if "PHPSESSID" in self.session.cookies:
+                        new_cookie = self.session.cookies["PHPSESSID"]
+                        print(f"✅ Login Successful! New Cookie: {new_cookie}")
+                        self.save_cookie_to_file(new_cookie) # فائل میں محفوظ کریں
+                        self.last_login_time = time.time()
+                    else:
+                        print("❌ Login Failed: No Cookie")
+                else:
+                    print("❌ Login Failed: Captcha Not Found")
+            except Exception as e:
+                print(f"⚠️ Login Error: {e}")
 
     def keep_alive_loop(self):
         while True:
             try:
-                # Check session validity
+                # صرف پنگ کریں، لاگ ان نہیں
                 ts = self.get_timestamp()
                 check_url = f"{URL_OTP_BASE}&_={ts}"
+                r = self.session.get(check_url, timeout=10)
                 
-                # Fast check (5s timeout)
-                r = self.session.get(check_url, timeout=5)
-                
-                if "login" in r.text.lower() or "direct script" in r.text.lower():
-                    print("⚠️ Session Expired. Re-logging immediately...")
+                if "login" in r.text.lower():
+                    print("⚠️ Background: Session Dead. Logging in...")
                     self.login()
                 else:
-                    # Session is good
+                    # سیشن زندہ ہے
                     pass
             except:
                 pass
             
-            # 15 سیکنڈ کا وقفہ تاکہ سیشن فریش رہے
-            time.sleep(15)
+            # ہر 40 سیکنڈ بعد پنگ کریں (زیادہ تیز نہیں)
+            time.sleep(40)
 
-# Initialize Manager
 manager = SessionManager()
-
-# Start Background Thread
 threading.Thread(target=manager.keep_alive_loop, daemon=True).start()
 
 @app.route('/')
 def home():
-    return "⚡ High-Performance API Running on Gevent!"
+    return "🚀 Stable API Running with File Persistence!"
 
 @app.route('/api')
 def handle_request():
@@ -120,16 +147,14 @@ def handle_request():
         return jsonify({"error": "Invalid type"}), 400
 
     try:
-        # Main request with 15s timeout
-        # یہ ریکویسٹ لاگ ان نہیں کرے گی، صرف ڈیٹا لائے گی
         response = manager.session.get(target_url, timeout=15)
         
-        # اگر ایچ ٹی ایم ایل آئے تو فوراً بیک گراؤنڈ لاگ ان ٹریگر کریں
-        # لیکن یوزر کو ابھی ایرر دکھا دیں تاکہ ہینگ نہ ہو
+        # اگر ایچ ٹی ایم ایل آئے تو لاگ ان کریں اور دوبارہ ٹرائی کریں
         if "login" in response.text.lower():
-            # Trigger background login asynchronously
-            threading.Thread(target=manager.login).start()
-            return jsonify({"status": "refreshing", "message": "Session refreshing, try again in 3 seconds"}), 503
+            print("⚠️ Request: Session expired. Refreshing...")
+            manager.login()
+            # دوبارہ ریکویسٹ
+            response = manager.session.get(target_url, timeout=15)
 
         try:
             return jsonify(response.json())
@@ -141,4 +166,7 @@ def handle_request():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    # Production Server
+    from gevent.pywsgi import WSGIServer
+    http_server = WSGIServer(('0.0.0.0', port), app)
+    http_server.serve_forever()
