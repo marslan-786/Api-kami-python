@@ -4,7 +4,7 @@ import requests
 import re
 import os
 import logging
-from flask import Flask, request, Response, stream_with_context
+from flask import Flask, jsonify, request, Response
 from gevent.pywsgi import WSGIServer
 
 app = Flask(__name__)
@@ -96,9 +96,9 @@ class SessionManager:
             try:
                 ts = self.get_timestamp()
                 check_url = f"{URL_OTP_BASE}&_={ts}"
-                # Just fetch headers to verify session (efficient)
+                # پنگ کریں لیکن ڈیٹا ڈاؤنلوڈ نہ کریں (صرف ہیڈرز)
                 r = self.session.get(check_url, timeout=10, stream=True)
-                chunk = next(r.iter_content(chunk_size=1024), b"")
+                chunk = next(r.iter_content(chunk_size=512), b"")
                 r.close()
                 
                 if b"login" in chunk.lower() or b"direct script" in chunk.lower():
@@ -106,14 +106,14 @@ class SessionManager:
                     self.login()
             except:
                 pass
-            time.sleep(40)
+            time.sleep(30)
 
 manager = SessionManager()
 threading.Thread(target=manager.keep_alive_loop, daemon=True).start()
 
 @app.route('/')
 def home():
-    return "🚀 Rocket Mode: Direct Pass-Through Active!"
+    return "🚀 Fixed JSON API is Running!"
 
 @app.route('/api')
 def handle_request():
@@ -126,39 +126,25 @@ def handle_request():
     elif request_type == 'sms':
         target_url = f"{URL_OTP_BASE}&_={ts}"
     else:
-        return Response("Error: Invalid type", status=400)
+        return jsonify({"error": "Invalid type"}), 400
 
     try:
-        # stream=True کا مطلب ہے ڈیٹا کو میموری میں روکے بغیر آگے بھیجو
-        upstream_req = manager.session.get(target_url, stream=True, timeout=25)
+        # 1. ڈیٹا لائیں (ٹائم آؤٹ 30 سیکنڈ)
+        # stream=False کر دیا تاکہ ہم content چیک کر سکیں
+        response = manager.session.get(target_url, timeout=30)
         
-        # رسپانس ہیڈرز چیک کریں کہ JSON ہے یا HTML
-        c_type = upstream_req.headers.get('Content-Type', '')
+        # 2. اگر لاگ ان ایرر ہے تو دوبارہ کریں
+        if "login" in response.text.lower() or "Direct Script" in response.text:
+            print("⚠️ Request: Session expired. Refreshing...")
+            manager.login()
+            response = manager.session.get(target_url, timeout=30)
 
-        # اگر HTML ہے (مطلب لاگ ان پیج یا ایرر)
-        if 'text/html' in c_type:
-            # تھوڑا سا ڈیٹا پڑھ کر کنفرم کریں
-            chunk = next(upstream_req.iter_content(chunk_size=1024), b"")
-            if b"login" in chunk.lower() or b"Direct Script" in chunk:
-                print("⚠️ Request: Session expired. Refreshing...")
-                upstream_req.close()
-                manager.login()
-                # دوبارہ ٹرائی کریں
-                upstream_req = manager.session.get(target_url, stream=True, timeout=25)
-            else:
-                # اگر کوئی اور ایچ ٹی ایم ایل ایرر ہے تو وہی دکھا دیں
-                return Response(chunk, status=upstream_req.status_code)
-
-        # 🚀 THE MAGIC: Direct Streaming
-        # ہم ڈیٹا کو variable میں اسٹور نہیں کر رہے، سیدھا آگے بھیج رہے ہیں
-        return Response(
-            stream_with_context(upstream_req.iter_content(chunk_size=8192)),
-            content_type=upstream_req.headers.get('Content-Type'),
-            status=upstream_req.status_code
-        )
+        # 3. 🚀 FORCE JSON RESPONSE
+        # ہم ڈیٹا کو کنورٹ نہیں کر رہے (اسپیڈ کے لیے)، بس Header تبدیل کر رہے ہیں
+        return Response(response.content, mimetype='application/json')
 
     except Exception as e:
-        return Response(str(e), status=500)
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
