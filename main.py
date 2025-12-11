@@ -12,7 +12,7 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 CREDENTIALS = {
-    "username": "Kami522",
+    "username": "Kami520",
     "password": "Kami526"
 }
 
